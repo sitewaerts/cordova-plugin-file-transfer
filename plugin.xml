@@ -82,4 +82,9 @@
             <clobbers target="window.FileTransfer" />
         </js-module>
     </platform>
+
+    <platform name="electron">
+        <framework src="src/electron" />
+    </platform>
+
 </plugin>
