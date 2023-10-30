@@ -25,6 +25,9 @@ const XMLHttpRequest = require("xmlhttprequest").XMLHttpRequest;
 const http = require("http");
 const https = require("https");
 
+// reduce bridge traffic
+const PROGRESS_INTERVAL_MILLIS = 400;
+
 
 //https.globalAgent.options.ca = require('ssl-root-cas/latest').create();
 
@@ -322,7 +325,12 @@ const fileTransferPlugin = {
         const xhr = new XMLHttpRequest();
 
         const transaction = fileTransferOps[transactionId] =
-            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, {abort: ()=>{xhr.abort()}}, callbackContext);
+            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, {
+                abort: () =>
+                {
+                    xhr.abort()
+                }
+            }, callbackContext);
 
 
         fileKey = fileKey || 'file';
@@ -357,37 +365,49 @@ const fileTransferPlugin = {
 
             xhr.open(httpMethod, target);
 
-            for (const header in headers) {
-                if (Object.prototype.hasOwnProperty.call(headers, header)) {
+            for (const header in headers)
+            {
+                if (Object.prototype.hasOwnProperty.call(headers, header))
+                {
                     xhr.setRequestHeader(header, headers[header]);
                 }
             }
 
-            xhr.onload = function () {
-                if (this.status >= 200 && this.status < 300) {
+            xhr.onload = function ()
+            {
+                if (this.status >= 200 && this.status < 300)
+                {
                     transaction.success(new FileUploadResult(stats.size, this.status, this.response));
-                } else if (this.status === 404) {
+                }
+                else if (this.status === 404)
+                {
                     transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target))
-                } else {
+                }
+                else
+                {
                     transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, this.status, this.response));
                 }
             };
 
-            xhr.ontimeout = function () {
+            xhr.ontimeout = function ()
+            {
                 transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, this.status, this.response));
             };
 
-            xhr.onerror = function (error) {
+            xhr.onerror = function (error)
+            {
                 transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, this.status, this.response, error));
             };
 
-            xhr.onabort = function () {
+            xhr.onabort = function ()
+            {
                 transaction.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target));
             };
 
             // xhr.upload not implemented
-            if(xhr.upload)
-                xhr.upload.onprogress = function (e) {
+            if (xhr.upload)
+                xhr.upload.onprogress = function (e)
+                {
                     transaction.progress(e)
                 };
 
@@ -432,10 +452,19 @@ const fileTransferPlugin = {
             return callbackContext.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
                 null, null, "transactionId " + transactionId + " already in use"));
 
-        let req ;
+        let req;
 
         const transaction = fileTransferOps[transactionId] =
-            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, {abort: ()=>{if(req){req.destroy();req=null}}}, callbackContext);
+            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, {
+                abort: () =>
+                {
+                    if (req)
+                    {
+                        req.destroy();
+                        req = null
+                    }
+                }
+            }, callbackContext);
 
 
         fileKey = fileKey || 'file';
@@ -448,72 +477,92 @@ const fileTransferPlugin = {
 
         httpMethod = httpMethod && httpMethod.toUpperCase() === 'PUT' ? 'PUT' : 'POST';
 
-        fs.stat(filePath).then((stats) =>
-        {
-            if (!stats.isFile())
-                return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target,
-                    null, null, "source is not a file"));
+        let done = false
 
-            const form = new FormData();
-            form.append(
-                fileKey,
-                fs.readFileSync(filePath),
-                {
-                    contentType: mimeType,
-                    filename: fileName,
-                });
-            Object.keys(params).forEach((key) =>
+        fs.stat(filePath)
+            .then((stats) =>
             {
-                form.append(key, params[key]);
-            })
+                if (!stats.isFile())
+                    return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target,
+                        null, null, "source is not a file"));
 
-            req = (target.startsWith("https:") ? https : http).request(target, {
-                method: httpMethod,
-                headers: form.getHeaders(headers),
-                rejectUnauthorized: trustAllHosts
-            }, (res) =>
+                const form = new FormData();
+                form.append(
+                    fileKey,
+                    fs.readFileSync(filePath),
+                    {
+                        contentType: mimeType,
+                        filename: fileName,
+                    });
+                Object.keys(params).forEach((key) =>
+                {
+                    form.append(key, params[key]);
+                })
+
+                req = (target.startsWith("https:") ? https : http).request(target, {
+                    method: httpMethod,
+                    headers: form.getHeaders(headers),
+                    rejectUnauthorized: trustAllHosts
+                }, (res) =>
+                {
+                    done = true;
+
+                    if (res.statusCode === 404)
+                    {
+                        return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target))
+                    }
+                    else if (res.statusCode < 200 || res.statusCode >= 300)
+                    {
+                        return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.statusCode, res));
+                    }
+
+                    res.on('data', () =>
+                    {
+                        // ensure all chunk are read
+                    });
+                    res.on('end', () =>
+                    {
+                        transaction.success(new FileUploadResult(stats.size, res.statusCode, res));
+                    });
+                });
+
+                req.on('error', (error) =>
+                {
+                    transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
+                })
+
+
+                form.pipe(req);
+                req.end();
+
+                const progress = () =>
+                {
+                    if (done)
+                        return;
+
+                    if (req.connection && req.connection.bytesWritten)
+                        callbackContext.progress({
+                            lengthComputable: true,
+                            loaded: req.connection.bytesWritten,
+                            total: stats.size
+                        })
+
+                    setTimeout(progress, PROGRESS_INTERVAL_MILLIS);
+                }
+                req.on('socket', progress);
+
+            }, (error) =>
             {
-
-                console.log(`STATUS: ${res.statusCode}`);
-
-                if (res.statusCode === 404)
-                {
-                    return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target))
-                }
-                else if (res.statusCode < 200 || res.statusCode >= 300)
-                {
-                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.statusCode, res));
-                }
-
-                res.on('data', (chunk) =>
-                {
-                    console.log(`BODY: ${chunk}`);
-                });
-                res.on('end', () =>
-                {
-                    console.log('No more data in response.');
-                    transaction.success(new FileUploadResult(stats.size, res.statusCode, res));
-                });
-            });
-
-            req.on('error', (error)=>{
-                transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
+                if (isNotFoundError(error))
+                    return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
+                return transaction.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+                    null, null, error));
             })
-
-            form.pipe(req);
-            req.end();
-
-
-
-        }, (error) =>
-        {
-            if (isNotFoundError(error))
-                return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
-            return transaction.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
-                null, null, error));
-        })
-
-
+            .catch((error) =>
+            {
+                return transaction.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+                    null, null, error));
+            })
     },
     /**
      *
@@ -587,9 +636,9 @@ const fileTransferPlugin = {
                     if (!res.ok)
                     {
                         if (res.status === 404)
-                            return transaction.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target, res.status, res.body));
+                            return transaction.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target, res.status, res));
                         else
-                            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.status, res.body));
+                            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.status, res));
                     }
 
                     /**
@@ -598,31 +647,31 @@ const fileTransferPlugin = {
                     const reader = res.body.getReader();
                     const contentLength = res.headers.has('Content-Length') ? +res.headers.get('Content-Length') : 0;
                     let receivedLength = 0;
-
+                    let nextProgress = 0;
                     while (true)
                     {
                         const {done, value} = await reader.read();
                         if (done)
                             break;
 
-                        const buf  = Buffer.from(value);
+                        const buf = Buffer.from(value);
                         await fs.write(fd, buf, 0, buf.length, receivedLength)
                         receivedLength += value.length;
 
-                        if(!!contentLength)
-                            transaction.progress({
-                                lengthComputable: true,
-                                loaded: receivedLength,
-                                total: contentLength
-                            })
+                        if (!!contentLength)
+                        {
+                            const now = Date.now();
+                            if (nextProgress < now)
+                            {
+                                nextProgress = now + PROGRESS_INTERVAL_MILLIS;
+                                transaction.progress({
+                                    lengthComputable: true,
+                                    loaded: receivedLength,
+                                    total: contentLength
+                                })
+                            }
+                        }
                     }
-
-                    // if(!contentLength)
-                    //     transaction.progress({
-                    //         lengthComputable: true,
-                    //         loaded: receivedLength,
-                    //         total: receivedLength
-                    //     })
 
                     transaction.success(await resolveLocalFileSystemURI(target, callbackContext));
 
