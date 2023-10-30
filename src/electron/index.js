@@ -21,35 +21,45 @@
 
 const path = require('path');
 const fs = require('fs-extra');
+const XMLHttpRequest = require("xmlhttprequest").XMLHttpRequest;
+const http = require("http");
+const https = require("https");
+
+
+//https.globalAgent.options.ca = require('ssl-root-cas/latest').create();
 
 // const fetch = require('electron-fetch').default
 const FormData = require('form-data')
 
-
-function getFilePluginUtil()
+/**
+ *
+ * @param callbackContext
+ * @returns {any}
+ */
+function getFilePluginUtil(callbackContext)
 {
-    // TODO: find better way to lookup this dependency
-    // currently plugin is loaded twice, which is not intended behaviour
-    return require('cordova-plugin-file/src/electron').util
+    return callbackContext.getCordovaService('File').util;
 }
 
 /**
  * get absolute file path for given url (cdvfile://, efs://)
  * @param {string} url
+ * @param callbackContext
  * @returns {string | null}
  */
-function urlToFilePath(url)
+function urlToFilePath(url, callbackContext)
 {
-    return getFilePluginUtil().urlToFilePath(url);
+    return getFilePluginUtil(callbackContext).urlToFilePath(url);
 }
 
 /**
  * @param {string} uri
+ * @param callbackContext
  * @returns {Promise<EntryInfo>}
  */
-function resolveLocalFileSystemURI(uri)
+function resolveLocalFileSystemURI(uri, callbackContext)
 {
-    return getFilePluginUtil().resolveLocalFileSystemURI(uri);
+    return getFilePluginUtil(callbackContext).resolveLocalFileSystemURI(uri);
 }
 
 class FileTransferError
@@ -80,19 +90,28 @@ FileTransferError.CONNECTION_ERR = 3;
 FileTransferError.ABORT_ERR = 4;
 FileTransferError.NOT_MODIFIED_ERR = 5;
 
+/**
+ * @typedef {Object} AbortableAction
+ * @property {(cause?:any)=>void} abort
+ */
+
+
 class FileTransferOperation
 {
     /**
      *
      * @param {string} transactionId
      * @param {number} state
-     * @param {AbortController} abortCtrl
+     * @param {AbortableAction} abortCtrl
      * @param {CallbackContext} callbackContext
      */
     constructor(transactionId, state, abortCtrl, callbackContext)
     {
         this.transactionId = transactionId;
         this.state = state;
+        /**
+         * @type {AbortableAction | null}
+         */
         this.abortCtrl = abortCtrl;
         this.callbackContext = callbackContext;
 
@@ -146,6 +165,7 @@ FileTransferOperation.DONE = 1;
 FileTransferOperation.CANCELLED = 2;
 FileTransferOperation.FAILED = 3;
 
+
 /**
  *
  * @type {Record<string, FileTransferOperation>}
@@ -159,13 +179,13 @@ class FileUploadResult
      *
      * @param {number} size
      * @param {number} code
-     * @param {any} content
+     * @param {any} response
      */
-    constructor(size, code, content)
+    constructor(size, code, response)
     {
         this.bytesSent = size;
         this.responseCode = code;
-        this.response = content;
+        this.response = response;
     }
 }
 
@@ -197,17 +217,17 @@ const fileTransferPlugin = {
      * @param {CallbackContext} callbackContext
      * @void
      */
-    upload: function ([source, target, fileKey, fileName, mimeType, params, trustAllHosts, chunkedMode, headers, transactionId, httpMethod], callbackContext)
+    uploadFetch: function ([source, target, fileKey, fileName, mimeType, params, trustAllHosts, chunkedMode, headers, transactionId, httpMethod], callbackContext)
     {
         if (!checkURL(target))
             return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
 
-        const filePath = urlToFilePath(source);
+        const filePath = urlToFilePath(source, callbackContext);
         if (!filePath)
             return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
 
         if (fileTransferOps[transactionId])
-            return callbackContext.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+            return callbackContext.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
                 null, null, "transactionId " + transactionId + " already in use"));
         const transaction = fileTransferOps[transactionId] =
             new FileTransferOperation(transactionId, FileTransferOperation.PENDING, new AbortController(), callbackContext);
@@ -242,7 +262,7 @@ const fileTransferPlugin = {
 
             // progress currently not supported
             fetch(target, {
-                headers,
+                headers: form.getHeaders(headers),
                 method: httpMethod,
                 signal: transaction.abortCtrl.signal,
                 body: form
@@ -259,6 +279,231 @@ const fileTransferPlugin = {
                 {
                     transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
                 })
+
+        }, (error) =>
+        {
+            if (isNotFoundError(error))
+                return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
+            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
+                null, null, error));
+        })
+
+
+    },
+
+    /**
+     * @param {string} source
+     * @param {string} target
+     * @param {string|null} fileKey
+     * @param {string|null} fileName
+     * @param {string|null} mimeType
+     * @param {Record<string, string> | null} params
+     * @param {boolean} trustAllHosts
+     * @param {boolean} chunkedMode
+     * @param {Record<string | Array<string>> | null} headers
+     * @param {string} transactionId
+     * @param {string|null} httpMethod
+     * @param {CallbackContext} callbackContext
+     * @void
+     */
+    uploadXHR: function ([source, target, fileKey, fileName, mimeType, params, trustAllHosts, chunkedMode, headers, transactionId, httpMethod], callbackContext)
+    {
+        if (!checkURL(target))
+            return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
+
+        const filePath = urlToFilePath(source, callbackContext);
+        if (!filePath)
+            return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
+
+        if (fileTransferOps[transactionId])
+            return callbackContext.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+                null, null, "transactionId " + transactionId + " already in use"));
+
+        const xhr = new XMLHttpRequest();
+
+        const transaction = fileTransferOps[transactionId] =
+            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, {abort: ()=>{xhr.abort()}}, callbackContext);
+
+
+        fileKey = fileKey || 'file';
+        fileName = fileName || 'image.jpg';
+        mimeType = mimeType || 'image/jpeg';
+        params = params || {};
+        headers = headers || {};
+
+        httpMethod = httpMethod && httpMethod.toUpperCase() === 'PUT' ? 'PUT' : 'POST';
+
+        // to make this configurable an additional api parameter (and options field) would be required
+        xhr.withCredentials = false;
+
+        fs.stat(filePath).then((stats) =>
+        {
+            if (!stats.isFile())
+                return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target,
+                    null, null, "source is not a file"));
+
+            const form = new FormData();
+            form.append(
+                fileKey,
+                fs.readFileSync(filePath),
+                {
+                    contentType: mimeType,
+                    filename: fileName,
+                });
+            Object.keys(params).forEach((key) =>
+            {
+                form.append(key, params[key]);
+            })
+
+            xhr.open(httpMethod, target);
+
+            for (const header in headers) {
+                if (Object.prototype.hasOwnProperty.call(headers, header)) {
+                    xhr.setRequestHeader(header, headers[header]);
+                }
+            }
+
+            xhr.onload = function () {
+                if (this.status >= 200 && this.status < 300) {
+                    transaction.success(new FileUploadResult(stats.size, this.status, this.response));
+                } else if (this.status === 404) {
+                    transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target))
+                } else {
+                    transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, this.status, this.response));
+                }
+            };
+
+            xhr.ontimeout = function () {
+                transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, this.status, this.response));
+            };
+
+            xhr.onerror = function (error) {
+                transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, this.status, this.response, error));
+            };
+
+            xhr.onabort = function () {
+                transaction.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target));
+            };
+
+            // xhr.upload not implemented
+            if(xhr.upload)
+                xhr.upload.onprogress = function (e) {
+                    transaction.progress(e)
+                };
+
+            xhr.send(form);
+
+        }, (error) =>
+        {
+            if (isNotFoundError(error))
+                return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
+            return transaction.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+                null, null, error));
+        })
+
+
+    },
+
+    /**
+     * @param {string} source
+     * @param {string} target
+     * @param {string|null} fileKey
+     * @param {string|null} fileName
+     * @param {string|null} mimeType
+     * @param {Record<string, string> | null} params
+     * @param {boolean} trustAllHosts
+     * @param {boolean} chunkedMode
+     * @param {Record<string | Array<string>> | null} headers
+     * @param {string} transactionId
+     * @param {string|null} httpMethod
+     * @param {CallbackContext} callbackContext
+     * @void
+     */
+    upload: function ([source, target, fileKey, fileName, mimeType, params, trustAllHosts, chunkedMode, headers, transactionId, httpMethod], callbackContext)
+    {
+        if (!checkURL(target))
+            return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
+
+        const filePath = urlToFilePath(source, callbackContext);
+        if (!filePath)
+            return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
+
+        if (fileTransferOps[transactionId])
+            return callbackContext.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+                null, null, "transactionId " + transactionId + " already in use"));
+
+        let req ;
+
+        const transaction = fileTransferOps[transactionId] =
+            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, {abort: ()=>{if(req){req.destroy();req=null}}}, callbackContext);
+
+
+        fileKey = fileKey || 'file';
+        fileName = fileName || 'image.jpg';
+        mimeType = mimeType || 'image/jpeg';
+        params = params || {};
+        headers = headers || {};
+
+        trustAllHosts = !!trustAllHosts;
+
+        httpMethod = httpMethod && httpMethod.toUpperCase() === 'PUT' ? 'PUT' : 'POST';
+
+        fs.stat(filePath).then((stats) =>
+        {
+            if (!stats.isFile())
+                return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target,
+                    null, null, "source is not a file"));
+
+            const form = new FormData();
+            form.append(
+                fileKey,
+                fs.readFileSync(filePath),
+                {
+                    contentType: mimeType,
+                    filename: fileName,
+                });
+            Object.keys(params).forEach((key) =>
+            {
+                form.append(key, params[key]);
+            })
+
+            req = (target.startsWith("https:") ? https : http).request(target, {
+                method: httpMethod,
+                headers: form.getHeaders(headers),
+                rejectUnauthorized: trustAllHosts
+            }, (res) =>
+            {
+
+                console.log(`STATUS: ${res.statusCode}`);
+
+                if (res.statusCode === 404)
+                {
+                    return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target))
+                }
+                else if (res.statusCode < 200 || res.statusCode >= 300)
+                {
+                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.statusCode, res));
+                }
+
+                res.on('data', (chunk) =>
+                {
+                    console.log(`BODY: ${chunk}`);
+                });
+                res.on('end', () =>
+                {
+                    console.log('No more data in response.');
+                    transaction.success(new FileUploadResult(stats.size, res.statusCode, res));
+                });
+            });
+
+            req.on('error', (error)=>{
+                transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
+            })
+
+            form.pipe(req);
+            req.end();
+
+
 
         }, (error) =>
         {
@@ -285,14 +530,14 @@ const fileTransferPlugin = {
         if (!checkURL(source))
             return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
 
-        const filePath = urlToFilePath(target);
+        const filePath = urlToFilePath(target, callbackContext);
         if (!filePath)
             return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
 
         const parentPath = path.dirname(filePath);
 
         if (fileTransferOps[transactionId])
-            return callbackContext.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+            return callbackContext.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
                 null, null, "transactionId " + transactionId + " already in use"));
         const transaction = fileTransferOps[transactionId] =
             new FileTransferOperation(transactionId, FileTransferOperation.PENDING, new AbortController(), callbackContext);
@@ -314,7 +559,7 @@ const fileTransferPlugin = {
                 {
                     if (isNotFoundError(error))
                         return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
-                    return transaction.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
                         null, null, error));
                 }
 
@@ -327,7 +572,7 @@ const fileTransferPlugin = {
                     fd = await fs.open(filePath, 'w');
                 } catch (error)
                 {
-                    return transaction.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
                         null, null, error));
                 }
 
@@ -379,7 +624,7 @@ const fileTransferPlugin = {
                     //         total: receivedLength
                     //     })
 
-                    transaction.success(await resolveLocalFileSystemURI(target));
+                    transaction.success(await resolveLocalFileSystemURI(target, callbackContext));
 
                 } catch (error)
                 {
@@ -397,7 +642,7 @@ const fileTransferPlugin = {
         )
         ().catch((error) =>
         {
-            return transaction.error(new FileTransferError(FileTransferError.ABORT_ERR, source, target,
+            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
                 null, null, error));
         });
     },
