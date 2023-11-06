@@ -9,7 +9,7 @@
         "file",
         "native"
     ],
-    "author": "Apache Software Foundation",
+    "author": "sitewaerts GmbH",
     "license": "Apache-2.0",
     "dependencies": {
         "electron-fetch": "^1.9.1",
