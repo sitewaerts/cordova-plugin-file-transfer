@@ -34,36 +34,7 @@ const PROGRESS_INTERVAL_MILLIS = 400;
 // const fetch = require('electron-fetch').default
 const FormData = require('form-data')
 
-/**
- *
- * @param callbackContext
- * @returns {any}
- */
-function getFilePluginUtil(callbackContext)
-{
-    return callbackContext.getCordovaService('File').util;
-}
 
-/**
- * get absolute file path for given url (cdvfile://, efs://)
- * @param {string} url
- * @param callbackContext
- * @returns {string | null}
- */
-function urlToFilePath(url, callbackContext)
-{
-    return getFilePluginUtil(callbackContext).urlToFilePath(url);
-}
-
-/**
- * @param {string} uri
- * @param callbackContext
- * @returns {Promise<EntryInfo>}
- */
-function resolveLocalFileSystemURI(uri, callbackContext)
-{
-    return getFilePluginUtil(callbackContext).resolveLocalFileSystemURI(uri);
-}
 
 class FileTransferError
 {
@@ -225,7 +196,7 @@ const fileTransferPlugin = {
         if (!checkURL(target))
             return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
 
-        const filePath = urlToFilePath(source, callbackContext);
+        const filePath = _file_plugin_util.urlToFilePath(source);
         if (!filePath)
             return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
 
@@ -314,7 +285,7 @@ const fileTransferPlugin = {
         if (!checkURL(target))
             return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
 
-        const filePath = urlToFilePath(source, callbackContext);
+        const filePath = _file_plugin_util.urlToFilePath(source);
         if (!filePath)
             return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
 
@@ -444,7 +415,7 @@ const fileTransferPlugin = {
         if (!checkURL(target))
             return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
 
-        const filePath = urlToFilePath(source, callbackContext);
+        const filePath = _file_plugin_util.urlToFilePath(source);
         if (!filePath)
             return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
 
@@ -579,7 +550,7 @@ const fileTransferPlugin = {
         if (!checkURL(source))
             return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
 
-        const filePath = urlToFilePath(target, callbackContext);
+        const filePath = _file_plugin_util.urlToFilePath(target);
         if (!filePath)
             return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
 
@@ -673,7 +644,7 @@ const fileTransferPlugin = {
                         }
                     }
 
-                    transaction.success(await resolveLocalFileSystemURI(target, callbackContext));
+                    transaction.success(await _file_plugin_util.resolveLocalFileSystemURI(target));
 
                 } catch (error)
                 {
@@ -735,30 +706,15 @@ const plugin = function (action, args, callbackContext)
     return true;
 }
 
-// backwards compatibility: attach api methods for direct access from old cordova-electron platform impl
-Object.keys(fileTransferPlugin).forEach((apiMethod) =>
-{
-    plugin[apiMethod] = (args) =>
-    {
-        return Promise.resolve((resolve, reject) =>
-        {
-            fileTransferPlugin[apiMethod](args, {
-                progress: (data) =>
-                {
-                    console.warn("cordova-plugin-file-transfer: ignoring progress event as not supported in old plugin API", data);
-                },
-                success: (data) =>
-                {
-                    resolve(data)
-                },
-                error: (data) =>
-                {
-                    reject(data)
-                }
-            });
-        });
-    }
-});
+let _file_plugin_util;
 
+/**
+ * @param {Record<string, string>} variables
+ * @param {(serviceName:string)=>Promise<any>} serviceLoader
+ * @returns {Promise<void>}
+ */
+plugin.init = async (variables, serviceLoader)=>{
+    _file_plugin_util = _file_plugin_util || (await serviceLoader('File')).util
+}
 
 module.exports = plugin;
