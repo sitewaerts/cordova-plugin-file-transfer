@@ -24,6 +24,7 @@ const fs = require('fs-extra');
 const XMLHttpRequest = require("xmlhttprequest").XMLHttpRequest;
 const http = require("http");
 const https = require("https");
+const undici = require("undici");
 
 // reduce bridge traffic
 const PROGRESS_INTERVAL_MILLIS = 400;
@@ -545,7 +546,7 @@ const fileTransferPlugin = {
      * @param {CallbackContext} callbackContext
      * @void
      */
-    download: function ([source, target, trustAllHosts, transactionId, headers], callbackContext)
+    downloadFetch: function ([source, target, trustAllHosts, transactionId, headers], callbackContext)
     {
         if (!checkURL(source))
             return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
@@ -628,6 +629,141 @@ const fileTransferPlugin = {
                         const buf = Buffer.from(value);
                         await fs.write(fd, buf, 0, buf.length, receivedLength)
                         receivedLength += value.length;
+
+                        if (!!contentLength)
+                        {
+                            const now = Date.now();
+                            if (nextProgress < now)
+                            {
+                                nextProgress = now + PROGRESS_INTERVAL_MILLIS;
+                                transaction.progress({
+                                    lengthComputable: true,
+                                    loaded: receivedLength,
+                                    total: contentLength
+                                })
+                            }
+                        }
+                    }
+
+                    transaction.success(await _file_plugin_util.resolveLocalFileSystemURI(target));
+
+                } catch (error)
+                {
+                    console.error(error);
+                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
+                } finally
+                {
+                    if (fd)
+                        fs.close(fd).catch((error) =>
+                        {
+                            console.error("cannot close", error);
+                        });
+                }
+            }
+        )
+        ().catch((error) =>
+        {
+            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
+                null, null, error));
+        });
+    },
+
+    /**
+     *
+     * @param {string} source
+     * @param {string} target
+     * @param {boolean} trustAllHosts
+     * @param {string} transactionId
+     * @param {Record<string, string | Array<string>> | null} headers
+     * @param {CallbackContext} callbackContext
+     * @void
+     */
+    download: function ([source, target, trustAllHosts, transactionId, headers], callbackContext)
+    {
+        if (!checkURL(source))
+            return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
+
+        const filePath = _file_plugin_util.urlToFilePath(target);
+        if (!filePath)
+            return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
+
+        const parentPath = path.dirname(filePath);
+
+        if (fileTransferOps[transactionId])
+            return callbackContext.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
+                null, null, "transactionId " + transactionId + " already in use"));
+        const transaction = fileTransferOps[transactionId] =
+            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, new AbortController(), callbackContext);
+
+        (async () =>
+            {
+
+                /**
+                 * @type {Stats}
+                 */
+                let parentStats;
+                try
+                {
+                    parentStats = await fs.stat(parentPath);
+                    if (!parentStats.isDirectory())
+                        return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target,
+                            null, null, "target parent is not a directory"));
+                } catch (error)
+                {
+                    if (isNotFoundError(error))
+                        return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
+                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
+                        null, null, error));
+                }
+
+                /**
+                 * @type {number}
+                 */
+                let fd;
+                try
+                {
+                    fd = await fs.open(filePath, 'w');
+                } catch (error)
+                {
+                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
+                        null, null, error));
+                }
+
+                try
+                {
+                    const agent = new undici.Agent({
+                        connect: {
+                            rejectUnauthorized: !trustAllHosts
+                        }
+                    });
+
+
+                    const res = await undici.request(source, {
+                        headers: headers || {},
+                        method: 'GET',
+                        signal: transaction.abortCtrl.signal,
+                        dispatcher: agent
+                    })
+
+                    if (res.statusCode<200 || res.statusCode >=300)
+                    {
+                        if (res.statusCode === 404)
+                            return transaction.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target, res.statusCode, res));
+                        else
+                            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.statusCode, res));
+                    }
+
+                    const reader = res.body;
+                    const contentLength = res.headers['content-length'] ? +res.headers['content-length'] : 0;
+                    let receivedLength = 0;
+                    let nextProgress = 0;
+
+
+
+                    for await (const data of res.body) {
+                        const buf = Buffer.from(data);
+                        await fs.write(fd, buf, 0, buf.length, receivedLength)
+                        receivedLength += data.length;
 
                         if (!!contentLength)
                         {
