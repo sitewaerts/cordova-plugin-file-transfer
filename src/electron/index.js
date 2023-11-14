@@ -25,16 +25,18 @@ const XMLHttpRequest = require("xmlhttprequest").XMLHttpRequest;
 const http = require("http");
 const https = require("https");
 const undici = require("undici");
+const {net} = require("electron");
 
 // reduce bridge traffic
 const PROGRESS_INTERVAL_MILLIS = 400;
+
+const DOWNLOAD_ALGO = "net";
 
 
 //https.globalAgent.options.ca = require('ssl-root-cas/latest').create();
 
 // const fetch = require('electron-fetch').default
 const FormData = require('form-data')
-
 
 
 class FileTransferError
@@ -65,19 +67,13 @@ FileTransferError.CONNECTION_ERR = 3;
 FileTransferError.ABORT_ERR = 4;
 FileTransferError.NOT_MODIFIED_ERR = 5;
 
-/**
- * @typedef {Object} AbortableAction
- * @property {(cause?:any)=>void} abort
- */
-
-
 class FileTransferOperation
 {
     /**
      *
      * @param {string} transactionId
      * @param {number} state
-     * @param {AbortableAction} abortCtrl
+     * @param {AbortController} abortCtrl
      * @param {CallbackContext} callbackContext
      */
     constructor(transactionId, state, abortCtrl, callbackContext)
@@ -85,7 +81,7 @@ class FileTransferOperation
         this.transactionId = transactionId;
         this.state = state;
         /**
-         * @type {AbortableAction | null}
+         * @type {AbortController | null}
          */
         this.abortCtrl = abortCtrl;
         this.callbackContext = callbackContext;
@@ -172,6 +168,294 @@ function checkURL(url)
 function isNotFoundError(error)
 {
     return !!(error && error.code === 'ENOENT');
+}
+
+/**
+ *
+ * @type {Record<string, (source:string, target:string, headers:Record<string | Array<string>>, trustAllHosts:boolean, fd:number, progress:(p:{lengthComputable:boolean, loaded:number, total:number})=>void, abortCtrl:AbortController)=>Promise<void>>}
+ */
+const DOWNLOAD_IMPLS = {
+    'net':
+        (source, target, headers, trustAllHosts, fd, progress, abortCtrl) =>
+        {
+
+            return new Promise((resolve, reject) =>
+            {
+                const req = net.request({
+                    method: 'GET',
+                    url: source
+                });
+
+                if (headers)
+                {
+                    for (const name in headers)
+                        req.setHeader(name, headers[name]);
+                }
+
+                // TODO: handle trustAllHosts
+
+                abortCtrl.signal.addEventListener("abort", () =>
+                {
+                    req.abort();
+                });
+
+
+                req.on('response', (res) =>
+                {
+
+                    if (res.statusCode < 200 || res.statusCode >= 300)
+                    {
+                        if (res.statusCode === 404)
+                            return reject(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target, res.statusCode, res));
+                        else
+                            return reject(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.statusCode, res));
+                    }
+
+                    const contentLength = res.headers['content-length'] ? +res.headers['content-length'] : 0;
+                    let receivedLength = 0;
+                    let nextProgress = 0;
+
+                    let _aborted = false;
+
+                    /**
+                     * @type {Array<()=>Promise<void>>}
+                     */
+                    const _jobs = [];
+                    /**
+                     *
+                     * @type {Promise<void> | null}
+                     */
+                    let _currentJob = null;
+
+                    function startNextJob(force)
+                    {
+                        if (force || !_currentJob)
+                        {
+                            const next = _jobs.shift();
+                            _currentJob = next ? next() : null;
+                        }
+                    }
+
+                    /**
+                     *
+                     * @param {Buffer} chunk
+                     */
+                    function writeJob(chunk)
+                    {
+                        if (!_aborted)
+                            _jobs.push(async () =>
+                            {
+                                if (_aborted)
+                                    return startNextJob(true);
+
+                                try
+                                {
+                                    const buf = Buffer.from(chunk);
+                                    await fs.write(fd, buf, 0, buf.length, receivedLength)
+                                    receivedLength += chunk.length;
+
+                                    if (!!contentLength)
+                                    {
+                                        const now = Date.now();
+                                        if (nextProgress < now)
+                                        {
+                                            nextProgress = now + PROGRESS_INTERVAL_MILLIS;
+                                            progress({
+                                                lengthComputable: true,
+                                                loaded: receivedLength,
+                                                total: contentLength
+                                            })
+                                        }
+                                    }
+                                } catch (error)
+                                {
+                                    errorJob(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
+                                }
+                                startNextJob(true);
+                            });
+
+                        startNextJob(false);
+                    }
+
+                    function errorJob(error)
+                    {
+                        _aborted = true;
+                        _jobs.length = 0;
+                        _jobs.push(async () =>
+                        {
+                            await fs.write(fd, '', 0);
+                            reject(error);
+                        })
+                        startNextJob(false);
+                    }
+
+                    function successJob()
+                    {
+                        if (!_aborted)
+                        {
+                            _jobs.push(async () =>
+                            {
+                                if (!_aborted) resolve();
+                            })
+                            startNextJob(false);
+                        }
+                    }
+
+
+                    res.on('aborted', () =>
+                    {
+                        errorJob(new FileTransferError(FileTransferError.ABORT_ERR, source, target, null, null, null));
+                    })
+                    res.on('error', (error) =>
+                    {
+                        errorJob(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
+                    })
+                    res.on('data', writeJob);
+                    res.on('end', successJob);
+                })
+                req.on('error', (error) =>
+                {
+                    reject(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
+                })
+                req.end()
+
+            });
+
+
+        },
+    'undici':
+        (source, target, headers, trustAllHosts, fd, progress, abortCtrl) =>
+        {
+            // ISSUES
+            //  - undici.request ignores system/os trust store -> self-signed enterprise CA's won't work
+            return new Promise(async (resolve, reject) =>
+            {
+                try
+                {
+                    const agent = new undici.Agent({
+                        connect: {
+                            rejectUnauthorized: !trustAllHosts
+                        }
+                    });
+
+
+                    const res = await undici.request(source, {
+                        headers: headers || {},
+                        method: 'GET',
+                        signal: abortCtrl.signal,
+                        dispatcher: agent
+                    })
+
+                    if (res.statusCode < 200 || res.statusCode >= 300)
+                    {
+                        if (res.statusCode === 404)
+                            return reject(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target, res.statusCode, res));
+                        else
+                            return reject(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.statusCode, res));
+                    }
+
+                    const contentLength = res.headers['content-length'] ? +res.headers['content-length'] : 0;
+                    let receivedLength = 0;
+                    let nextProgress = 0;
+
+
+                    for await (const data of res.body)
+                    {
+                        const buf = Buffer.from(data);
+                        await fs.write(fd, buf, 0, buf.length, receivedLength)
+                        receivedLength += data.length;
+
+                        if (!!contentLength)
+                        {
+                            const now = Date.now();
+                            if (nextProgress < now)
+                            {
+                                nextProgress = now + PROGRESS_INTERVAL_MILLIS;
+                                progress({
+                                    lengthComputable: true,
+                                    loaded: receivedLength,
+                                    total: contentLength
+                                })
+                            }
+                        }
+                    }
+                    resolve();
+                } catch (e)
+                {
+                    if (e instanceof undici.errors.RequestAbortedError) // see https://github.com/nodejs/undici/blob/main/docs/api/Dispatcher.md#example-2---aborting-a-request
+                        reject(new FileTransferError(FileTransferError.ABORT_ERR, source, target, null, null, null));
+                    else
+                        reject(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, e));
+                }
+            });
+        },
+    'fetch':
+        (source, target, headers, trustAllHosts, fd, progress, abortCtrl) =>
+        {
+            // ISSUES
+            //  - fetch ignores system/os trust store -> self-signed enterprise CA's won't work
+            return new Promise(async (resolve, reject) =>
+            {
+                try
+                {
+                    const res = await fetch(source, {
+                        headers: headers || {},
+                        method: 'GET',
+                        signal: abortCtrl.signal
+                    })
+
+                    if (!res.ok)
+                    {
+                        if (res.status === 404)
+                            return reject(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target, res.status, res));
+                        else
+                            return reject(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.status, res));
+                    }
+
+                    /**
+                     * @type {Readable}
+                     */
+                    const reader = res.body.getReader();
+                    const contentLength = res.headers.has('Content-Length') ? +res.headers.get('Content-Length') : 0;
+                    let receivedLength = 0;
+                    let nextProgress = 0;
+                    while (true)
+                    {
+                        const {done, value} = await reader.read();
+                        if (done)
+                            break;
+
+                        const buf = Buffer.from(value);
+                        await fs.write(fd, buf, 0, buf.length, receivedLength)
+                        receivedLength += value.length;
+
+                        if (!!contentLength)
+                        {
+                            const now = Date.now();
+                            if (nextProgress < now)
+                            {
+                                nextProgress = now + PROGRESS_INTERVAL_MILLIS;
+                                progress({
+                                    lengthComputable: true,
+                                    loaded: receivedLength,
+                                    total: contentLength
+                                })
+                            }
+                        }
+                    }
+
+                    resolve();
+                } catch (e)
+                {
+                    // TODO: handle abort
+                    // if (e instanceof DOMException) // see https://developer.mozilla.org/en-US/docs/Web/API/AbortController#examples
+                    //     reject(new FileTransferError(FileTransferError.ABORT_ERR, source, target, null, null, null));
+                    // else
+                    reject(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, e));
+                }
+            });
+        }
+
 }
 
 
@@ -297,12 +581,12 @@ const fileTransferPlugin = {
         const xhr = new XMLHttpRequest();
 
         const transaction = fileTransferOps[transactionId] =
-            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, {
-                abort: () =>
-                {
-                    xhr.abort()
-                }
-            }, callbackContext);
+            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, new AbortController(), callbackContext);
+
+        transaction.abortCtrl.signal.addEventListener("abort", () =>
+        {
+            xhr.abort()
+        });
 
 
         fileKey = fileKey || 'file';
@@ -427,16 +711,18 @@ const fileTransferPlugin = {
         let req;
 
         const transaction = fileTransferOps[transactionId] =
-            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, {
-                abort: () =>
-                {
-                    if (req)
-                    {
-                        req.destroy();
-                        req = null
-                    }
-                }
-            }, callbackContext);
+            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, new AbortController(), callbackContext);
+
+
+        transaction.abortCtrl.signal.addEventListener("abort", () =>
+        {
+            if (req)
+            {
+                req.destroy();
+                req = null
+            }
+        });
+
 
 
         fileKey = fileKey || 'file';
@@ -536,137 +822,7 @@ const fileTransferPlugin = {
                     null, null, error));
             })
     },
-    /**
-     *
-     * @param {string} source
-     * @param {string} target
-     * @param {boolean} trustAllHosts
-     * @param {string} transactionId
-     * @param {Record<string, string | Array<string>> | null} headers
-     * @param {CallbackContext} callbackContext
-     * @void
-     */
-    downloadFetch: function ([source, target, trustAllHosts, transactionId, headers], callbackContext)
-    {
-        if (!checkURL(source))
-            return callbackContext.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target));
 
-        const filePath = _file_plugin_util.urlToFilePath(target);
-        if (!filePath)
-            return callbackContext.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
-
-        const parentPath = path.dirname(filePath);
-
-        if (fileTransferOps[transactionId])
-            return callbackContext.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
-                null, null, "transactionId " + transactionId + " already in use"));
-        const transaction = fileTransferOps[transactionId] =
-            new FileTransferOperation(transactionId, FileTransferOperation.PENDING, new AbortController(), callbackContext);
-
-        (async () =>
-            {
-
-                /**
-                 * @type {Stats}
-                 */
-                let parentStats;
-                try
-                {
-                    parentStats = await fs.stat(parentPath);
-                    if (!parentStats.isDirectory())
-                        return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target,
-                            null, null, "target parent is not a directory"));
-                } catch (error)
-                {
-                    if (isNotFoundError(error))
-                        return transaction.error(new FileTransferError(FileTransferError.FILE_NOT_FOUND_ERR, source, target));
-                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
-                        null, null, error));
-                }
-
-                /**
-                 * @type {number}
-                 */
-                let fd;
-                try
-                {
-                    fd = await fs.open(filePath, 'w');
-                } catch (error)
-                {
-                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
-                        null, null, error));
-                }
-
-                try
-                {
-                    const res = await fetch(source, {
-                        headers: headers || {},
-                        method: 'GET',
-                        signal: transaction.abortCtrl.signal
-                    })
-
-                    if (!res.ok)
-                    {
-                        if (res.status === 404)
-                            return transaction.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target, res.status, res));
-                        else
-                            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.status, res));
-                    }
-
-                    /**
-                     * @type {Readable}
-                     */
-                    const reader = res.body.getReader();
-                    const contentLength = res.headers.has('Content-Length') ? +res.headers.get('Content-Length') : 0;
-                    let receivedLength = 0;
-                    let nextProgress = 0;
-                    while (true)
-                    {
-                        const {done, value} = await reader.read();
-                        if (done)
-                            break;
-
-                        const buf = Buffer.from(value);
-                        await fs.write(fd, buf, 0, buf.length, receivedLength)
-                        receivedLength += value.length;
-
-                        if (!!contentLength)
-                        {
-                            const now = Date.now();
-                            if (nextProgress < now)
-                            {
-                                nextProgress = now + PROGRESS_INTERVAL_MILLIS;
-                                transaction.progress({
-                                    lengthComputable: true,
-                                    loaded: receivedLength,
-                                    total: contentLength
-                                })
-                            }
-                        }
-                    }
-
-                    transaction.success(await _file_plugin_util.resolveLocalFileSystemURI(target));
-
-                } catch (error)
-                {
-                    console.error(error);
-                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
-                } finally
-                {
-                    if (fd)
-                        fs.close(fd).catch((error) =>
-                        {
-                            console.error("cannot close", error);
-                        });
-                }
-            }
-        )
-        ().catch((error) =>
-        {
-            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
-                null, null, error));
-        });
-    },
 
     /**
      *
@@ -731,61 +887,12 @@ const fileTransferPlugin = {
 
                 try
                 {
-                    const agent = new undici.Agent({
-                        connect: {
-                            rejectUnauthorized: !trustAllHosts
-                        }
-                    });
-
-
-                    const res = await undici.request(source, {
-                        headers: headers || {},
-                        method: 'GET',
-                        signal: transaction.abortCtrl.signal,
-                        dispatcher: agent
-                    })
-
-                    if (res.statusCode<200 || res.statusCode >=300)
-                    {
-                        if (res.statusCode === 404)
-                            return transaction.error(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target, res.statusCode, res));
-                        else
-                            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.statusCode, res));
-                    }
-
-                    const reader = res.body;
-                    const contentLength = res.headers['content-length'] ? +res.headers['content-length'] : 0;
-                    let receivedLength = 0;
-                    let nextProgress = 0;
-
-
-
-                    for await (const data of res.body) {
-                        const buf = Buffer.from(data);
-                        await fs.write(fd, buf, 0, buf.length, receivedLength)
-                        receivedLength += data.length;
-
-                        if (!!contentLength)
-                        {
-                            const now = Date.now();
-                            if (nextProgress < now)
-                            {
-                                nextProgress = now + PROGRESS_INTERVAL_MILLIS;
-                                transaction.progress({
-                                    lengthComputable: true,
-                                    loaded: receivedLength,
-                                    total: contentLength
-                                })
-                            }
-                        }
-                    }
-
+                    await DOWNLOAD_IMPLS[DOWNLOAD_ALGO](source, target, headers, trustAllHosts, fd, transaction.progress.bind(transaction), transaction.abortCtrl)
                     transaction.success(await _file_plugin_util.resolveLocalFileSystemURI(target));
-
                 } catch (error)
                 {
                     console.error(error);
-                    return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, null, null, error));
+                    transaction.error(error);
                 } finally
                 {
                     if (fd)
@@ -798,7 +905,7 @@ const fileTransferPlugin = {
         )
         ().catch((error) =>
         {
-            return transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
+            transaction.error(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target,
                 null, null, error));
         });
     },
@@ -849,7 +956,8 @@ let _file_plugin_util;
  * @param {(serviceName:string)=>Promise<any>} serviceLoader
  * @returns {Promise<void>}
  */
-plugin.init = async (variables, serviceLoader)=>{
+plugin.init = async (variables, serviceLoader) =>
+{
     _file_plugin_util = _file_plugin_util || (await serviceLoader('File')).util
 }
 
