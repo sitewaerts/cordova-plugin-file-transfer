@@ -74,7 +74,7 @@ class FileTransferOperation
      * @param {string} transactionId
      * @param {number} state
      * @param {AbortController} abortCtrl
-     * @param {CallbackContext} callbackContext
+     * @param {CordovaElectronCallbackContext} callbackContext
      */
     constructor(transactionId, state, abortCtrl, callbackContext)
     {
@@ -473,7 +473,7 @@ const fileTransferPlugin = {
      * @param {Record<string | Array<string>> | null} headers
      * @param {string} transactionId
      * @param {string|null} httpMethod
-     * @param {CallbackContext} callbackContext
+     * @param {CordovaElectronCallbackContext} callbackContext
      * @void
      */
     uploadFetch: function ([source, target, fileKey, fileName, mimeType, params, trustAllHosts, chunkedMode, headers, transactionId, httpMethod], callbackContext)
@@ -562,7 +562,7 @@ const fileTransferPlugin = {
      * @param {Record<string | Array<string>> | null} headers
      * @param {string} transactionId
      * @param {string|null} httpMethod
-     * @param {CallbackContext} callbackContext
+     * @param {CordovaElectronCallbackContext} callbackContext
      * @void
      */
     uploadXHR: function ([source, target, fileKey, fileName, mimeType, params, trustAllHosts, chunkedMode, headers, transactionId, httpMethod], callbackContext)
@@ -692,7 +692,7 @@ const fileTransferPlugin = {
      * @param {Record<string | Array<string>> | null} headers
      * @param {string} transactionId
      * @param {string|null} httpMethod
-     * @param {CallbackContext} callbackContext
+     * @param {CordovaElectronCallbackContext} callbackContext
      * @void
      */
     upload: function ([source, target, fileKey, fileName, mimeType, params, trustAllHosts, chunkedMode, headers, transactionId, httpMethod], callbackContext)
@@ -831,7 +831,7 @@ const fileTransferPlugin = {
      * @param {boolean} trustAllHosts
      * @param {string} transactionId
      * @param {Record<string, string | Array<string>> | null} headers
-     * @param {CallbackContext} callbackContext
+     * @param {CordovaElectronCallbackContext} callbackContext
      * @void
      */
     download: function ([source, target, trustAllHosts, transactionId, headers], callbackContext)
@@ -913,7 +913,7 @@ const fileTransferPlugin = {
     /**
      *
      * @param {string} transactionId
-     * @param {CallbackContext} callbackContext
+     * @param {CordovaElectronCallbackContext} callbackContext
      * @void
      */
     abort:
@@ -928,11 +928,7 @@ const fileTransferPlugin = {
 }
 
 /**
- * cordova electron plugin api
- * @param {string} action
- * @param {Array<any>} args
- * @param {CallbackContext} callbackContext
- * @returns {boolean} indicating if action is available in plugin
+ * @type {CordovaElectronPlugin}
  */
 const plugin = function (action, args, callbackContext)
 {
@@ -951,14 +947,9 @@ const plugin = function (action, args, callbackContext)
 
 let _file_plugin_util;
 
-/**
- * @param {Record<string, string>} variables
- * @param {(serviceName:string)=>Promise<any>} serviceLoader
- * @returns {Promise<void>}
- */
-plugin.init = async (variables, serviceLoader) =>
+plugin.initialize = async (ctx) =>
 {
-    _file_plugin_util = _file_plugin_util || (await serviceLoader('File')).util
+    _file_plugin_util = _file_plugin_util || (await ctx.getService('File')).util
 }
 
 module.exports = plugin;
