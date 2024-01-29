@@ -31,6 +31,10 @@
 
     <dependency id="cordova-plugin-file" version=">=5.0.0" />
 
+    <!-- make these preferences available to the plugin impl (currently not required) -->
+<!--    <preference name="OverrideUserAgent" default="" />-->
+<!--    <preference name="AppendUserAgent" default="" />-->
+
     <js-module src="www/FileTransferError.js" name="FileTransferError">
         <clobbers target="window.FileTransferError" />
     </js-module>

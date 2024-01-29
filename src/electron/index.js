@@ -328,6 +328,7 @@ const DOWNLOAD_IMPLS = {
         {
             // ISSUES
             //  - undici.request ignores system/os trust store -> self-signed enterprise CA's won't work
+            //  - how to apply OverrideUserAgent/AppendUserAgent ?
             return new Promise(async (resolve, reject) =>
             {
                 try
@@ -394,6 +395,7 @@ const DOWNLOAD_IMPLS = {
         {
             // ISSUES
             //  - fetch ignores system/os trust store -> self-signed enterprise CA's won't work
+            //  - how to apply OverrideUserAgent/AppendUserAgent ?
             return new Promise(async (resolve, reject) =>
             {
                 try
@@ -459,7 +461,7 @@ const DOWNLOAD_IMPLS = {
 }
 
 
-const fileTransferPlugin = {
+const pluginAPI = {
 
     /**
      * @param {string} source
@@ -519,7 +521,10 @@ const fileTransferPlugin = {
                 form.append(key, params[key]);
             })
 
-            // progress currently not supported
+            // ISSUES
+            //  - system/os trust store
+            //  - progress
+            //  - how to apply OverrideUserAgent/AppendUserAgent ?
             fetch(target, {
                 headers: form.getHeaders(headers),
                 method: httpMethod,
@@ -618,6 +623,10 @@ const fileTransferPlugin = {
             {
                 form.append(key, params[key]);
             })
+
+            // ISSUES
+            //  - system/os trust store
+            //  - how to apply OverrideUserAgent/AppendUserAgent ?
 
             xhr.open(httpMethod, target);
 
@@ -756,6 +765,10 @@ const fileTransferPlugin = {
                 {
                     form.append(key, params[key]);
                 })
+
+                // ISSUES
+                //  - system/os trust store ?
+                //  - how to apply OverrideUserAgent/AppendUserAgent ?
 
                 req = (target.startsWith("https:") ? https : http).request(target, {
                     method: httpMethod,
@@ -932,11 +945,11 @@ const fileTransferPlugin = {
  */
 const plugin = function (action, args, callbackContext)
 {
-    if (!fileTransferPlugin[action])
+    if (!pluginAPI[action])
         return false;
     try
     {
-        fileTransferPlugin[action](args, callbackContext)
+        pluginAPI[action](args, callbackContext)
     } catch (e)
     {
         console.error(action + ' failed', e);
