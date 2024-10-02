@@ -25,7 +25,7 @@ const XMLHttpRequest = require("xmlhttprequest").XMLHttpRequest;
 const http = require("http");
 const https = require("https");
 const undici = require("undici");
-const {net} = require("electron");
+const {net, session} = require("electron");
 
 // reduce bridge traffic
 const PROGRESS_INTERVAL_MILLIS = 400;
@@ -183,7 +183,9 @@ const DOWNLOAD_IMPLS = {
             {
                 const req = net.request({
                     method: 'GET',
-                    url: source
+                    url: source,
+                    session: session.fromPartition(''),
+                    credentials: 'include'
                 });
 
                 if (headers)
@@ -766,9 +768,10 @@ const pluginAPI = {
                     form.append(key, params[key]);
                 })
 
-                // ISSUES
+                // TODO
                 //  - system/os trust store ?
                 //  - how to apply OverrideUserAgent/AppendUserAgent ?
+                //  - send credentials/session cookies
 
                 req = (target.startsWith("https:") ? https : http).request(target, {
                     method: httpMethod,
@@ -789,7 +792,7 @@ const pluginAPI = {
 
                     res.on('data', () =>
                     {
-                        // ensure all chunk are read
+                        // ensure all chunks are read
                     });
                     res.on('end', () =>
                     {
