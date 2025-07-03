@@ -443,6 +443,15 @@ exec(win, fail, 'FileTransfer', 'upload',
         // Create internal download operation object
         fileTransferOps[downloadId] = new FileTransferOperation(FileTransferOperation.PENDING, null);
 
+        var fileNotFoundErrorCallback = function(message)
+        {
+            return function (error)
+            {
+                console.error("FileTransferProxy: " + message, error);
+                errorCallback(new FTErr(FTErr.FILE_NOT_FOUND_ERR, source, target, null, null, error));
+            }
+        };
+
         var downloadCallback = function (storageFolder) {
             storageFolder.createFileAsync(tempFileName, Windows.Storage.CreationCollisionOption.replaceExisting).then(
                 function (storageFile) {
@@ -451,7 +460,7 @@ exec(win, fail, 'FileTransfer', 'upload',
                         return;
                     }
 
-                    // if download isn't cancelled, contunue with creating and preparing download operation
+                    // if download isn't cancelled, continue with creating and preparing download operation
                     var downloader = new Windows.Networking.BackgroundTransfer.BackgroundDownloader();
                     for (var header in headers) {
                         if (Object.prototype.hasOwnProperty.call(headers, header)) {
@@ -495,7 +504,7 @@ exec(win, fail, 'FileTransfer', 'upload',
                                     FileProxy.resolveLocalFileSystemURI(successCallback, null, [nativeURI]);
                                 },
                                 function (error) {
-                                    errorCallback(new FTErr(FTErr.FILE_NOT_FOUND_ERR, source, target, null, null, error));
+                                    fileNotFoundErrorCallback("cannot rename " + storageFile.path + " to " + fileName)(error);
                                 }
                             );
                         },
@@ -557,28 +566,35 @@ exec(win, fail, 'FileTransfer', 'upload',
                     );
                 },
                 function (error) {
-                    errorCallback(new FTErr(FTErr.FILE_NOT_FOUND_ERR, source, target, null, null, error));
+                    fileNotFoundErrorCallback("cannot create temp file " + tempFileName + " at " + storageFolder.path)(error);
                 }
             );
         };
 
-        var fileNotFoundErrorCallback = function (error) {
-            errorCallback(new FTErr(FTErr.FILE_NOT_FOUND_ERR, source, target, null, null, error));
-        };
+        Windows.Storage.StorageFolder.getFolderFromPathAsync(path).then(
+            downloadCallback,
+            function (error)
+            {
+                // Handle non-existent directory
+                if (error.number === -2147024894)
+                {
+                    var parent = path.substr(0, path.lastIndexOf('\\'));
+                    var folderNameToCreate = path.substr(path.lastIndexOf('\\') + 1);
 
-        Windows.Storage.StorageFolder.getFolderFromPathAsync(path).then(downloadCallback, function (error) {
-            // Handle non-existent directory
-            if (error.number === -2147024894) {
-                var parent = path.substr(0, path.lastIndexOf('\\'));
-                var folderNameToCreate = path.substr(path.lastIndexOf('\\') + 1);
-
-                Windows.Storage.StorageFolder.getFolderFromPathAsync(parent).then(function (parentFolder) {
-                    parentFolder.createFolderAsync(folderNameToCreate).then(downloadCallback, fileNotFoundErrorCallback);
-                }, fileNotFoundErrorCallback);
-            } else {
-                fileNotFoundErrorCallback();
-            }
-        });
+                    Windows.Storage.StorageFolder.getFolderFromPathAsync(parent).then(
+                        function (parentFolder)
+                        {
+                            parentFolder.createFolderAsync(folderNameToCreate).then(
+                                downloadCallback,
+                                fileNotFoundErrorCallback("cannot create folder " + folderNameToCreate));
+                        },
+                        fileNotFoundErrorCallback("cannot access parent folder " + parent));
+                }
+                else
+                {
+                    fileNotFoundErrorCallback("cannot access folder " + path)(error);
+                }
+            });
     },
 
     abort: function (successCallback, error, options) {
