@@ -411,7 +411,7 @@ exec(win, fail, 'FileTransfer', 'upload',
         var headers = options[4] || {};
 
         if (!target) {
-            errorCallback(new FTErr(FTErr.FILE_NOT_FOUND_ERR));
+            errorCallback(new FTErr(FTErr.FILE_NOT_FOUND_ERR, source, null, null, null, "target not specified"));
             return;
         }
         if (target.substr(0, 8) === 'file:///') {
@@ -431,7 +431,7 @@ exec(win, fail, 'FileTransfer', 'upload',
         var path = target.substr(0, target.lastIndexOf('\\'));
         var fileName = target.substr(target.lastIndexOf('\\') + 1);
         if (path === null || fileName === null) {
-            errorCallback(new FTErr(FTErr.FILE_NOT_FOUND_ERR));
+            errorCallback(new FTErr(FTErr.FILE_NOT_FOUND_ERR, source, target, null, null, "cannot resolve target. path=" + path, + ", fileName=" + fileName));
             return;
         }
         // Download to a temp file to avoid the file deletion on 304
@@ -456,7 +456,7 @@ exec(win, fail, 'FileTransfer', 'upload',
             storageFolder.createFileAsync(tempFileName, Windows.Storage.CreationCollisionOption.replaceExisting).then(
                 function (storageFile) {
                     if (alreadyCancelled(downloadId)) {
-                        errorCallback(new FTErr(FTErr.ABORT_ERR, source, target));
+                        errorCallback(new FTErr(FTErr.ABORT_ERR, source, target, null, null, "download already canceled"));
                         return;
                     }
 
@@ -474,7 +474,7 @@ exec(win, fail, 'FileTransfer', 'upload',
                         download = downloader.createDownload(uri, storageFile);
                     } catch (e) {
                         // so we handle this and call errorCallback
-                        errorCallback(new FTErr(FTErr.INVALID_URL_ERR));
+                        errorCallback(new FTErr(FTErr.INVALID_URL_ERR, source, target, null, null, e));
                         return;
                     }
 
@@ -499,9 +499,11 @@ exec(win, fail, 'FileTransfer', 'upload',
                                         .replace(appData.temporaryFolder.path, 'ms-appdata:///temp')
                                         .replace(/\\/g, '/');
 
-                                    // Passing null as error callback here because downloaded file should exist in any case
-                                    // otherwise the error callback will be hit during file creation in another place
-                                    FileProxy.resolveLocalFileSystemURI(successCallback, null, [nativeURI]);
+                                    FileProxy.resolveLocalFileSystemURI(
+                                        successCallback,
+                                        fileNotFoundErrorCallback("cannot resolveLocalFileSystemURI " + nativeURI),
+                                        [nativeURI]
+                                    );
                                 },
                                 function (error) {
                                     fileNotFoundErrorCallback("cannot rename " + storageFile.path + " to " + fileName)(error);
@@ -520,18 +522,23 @@ exec(win, fail, 'FileTransfer', 'upload',
                                     // in the other way, try to get response property
                                     var response = download.getResponseInformation();
                                     if (!response) {
-                                        resolve(new FTErr(FTErr.CONNECTION_ERR, source, target));
+                                        resolve(new FTErr(FTErr.CONNECTION_ERR, source, target, null, null, error));
                                     } else {
                                         if (download.progress.bytesReceived === 0) {
+                                            console.error("FileTransferProxy: no bytes received", {response: response, error:error});
                                             resolve(new FTErr(FTErr.FILE_NOT_FOUND_ERR, source, target, response.statusCode, null, error));
                                             return;
                                         }
                                         var reader = new Windows.Storage.Streams.DataReader(download.getResultStreamAt(0));
                                         reader.loadAsync(download.progress.bytesReceived).then(function (bytesLoaded) {
                                             var payload = reader.readString(bytesLoaded);
+                                            console.error("FileTransferProxy: error received", {payload: payload, error:error});
                                             resolve(
                                                 new FTErr(FTErr.FILE_NOT_FOUND_ERR, source, target, response.statusCode, payload, error)
                                             );
+                                        }).catch(function(e){
+                                            console.error("FileTransferProxy: cannot read error response", {error:error, e: e});
+                                            resolve(new FTErr(FTErr.FILE_NOT_FOUND_ERR, source, target, response.statusCode, null, error));
                                         });
                                     }
                                 }
@@ -547,6 +554,9 @@ exec(win, fail, 'FileTransfer', 'upload',
 
                                 // Cleanup, remove incompleted file
                                 storageFile.deleteAsync().then(function () {
+                                    errorCallback(fileTransferError);
+                                }, function(error){
+                                    console.error("FileTransferProxy: cannot delete invalid storage file " + storageFile.path, error);
                                     errorCallback(fileTransferError);
                                 });
                             });
