@@ -13,7 +13,7 @@
     ]
   },
   "scripts": {
-    "test": "npm run lint",
+    "test": "npm i && npm run lint",
     "lint": "eslint ."
   },
   "repository": "github:apache/cordova-plugin-file-transfer",
