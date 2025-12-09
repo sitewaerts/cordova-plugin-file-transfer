@@ -725,12 +725,14 @@ const pluginAPI = {
             new FileTransferOperation(transactionId, FileTransferOperation.PENDING, new AbortController(), callbackContext);
 
 
-        transaction.abortCtrl.signal.addEventListener("abort", () =>
+        transaction.abortCtrl.signal.addEventListener("abort", (error) =>
         {
+            console.error("aborted", error);
             if (req)
             {
                 req.destroy();
-                req = null
+                req = null;
+                transaction.error(error);
             }
         });
 
@@ -814,7 +816,7 @@ const pluginAPI = {
                     if (done)
                         return;
 
-                    if (req.connection && req.connection.bytesWritten)
+                    if (req && req.connection && req.connection.bytesWritten)
                         callbackContext.progress({
                             lengthComputable: true,
                             loaded: req.connection.bytesWritten,
