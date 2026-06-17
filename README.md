@@ -21,11 +21,9 @@ description: Upload and download files.
 #         under the License.
 -->
 
-|AppVeyor|Travis CI|
-|:-:|:-:|
-|[![Build status](https://ci.appveyor.com/api/projects/status/github/apache/cordova-plugin-file-transfer?branch=master)](https://ci.appveyor.com/project/ApacheSoftwareFoundation/cordova-plugin-file-transfer)|[![Build Status](https://travis-ci.org/apache/cordova-plugin-file-transfer.svg?branch=master)](https://travis-ci.org/apache/cordova-plugin-file-transfer)|
-
 # cordova-plugin-file-transfer
+
+[![Android Testsuite](https://github.com/apache/cordova-plugin-file-transfer/actions/workflows/android.yml/badge.svg)](https://github.com/apache/cordova-plugin-file-transfer/actions/workflows/android.yml) [![Chrome Testsuite](https://github.com/apache/cordova-plugin-file-transfer/actions/workflows/chrome.yml/badge.svg)](https://github.com/apache/cordova-plugin-file-transfer/actions/workflows/chrome.yml) [![iOS Testsuite](https://github.com/apache/cordova-plugin-file-transfer/actions/workflows/ios.yml/badge.svg)](https://github.com/apache/cordova-plugin-file-transfer/actions/workflows/ios.yml) [![Lint Test](https://github.com/apache/cordova-plugin-file-transfer/actions/workflows/lint.yml/badge.svg)](https://github.com/apache/cordova-plugin-file-transfer/actions/workflows/lint.yml)
 
 # Usage notice
 
@@ -61,7 +59,6 @@ cordova plugin add cordova-plugin-file-transfer
 - Android
 - Browser
 - iOS
-- Windows
 
 # FileTransfer
 
@@ -205,12 +202,6 @@ A `FileUploadResult` object is passed to the success callback of the
 
 - __withCredentials__: _boolean_ that tells the browser to set the withCredentials flag on the XMLHttpRequest
 
-### Windows Quirks
-
-- An option parameter with empty/null value is excluded in the upload operation due to the Windows API design.
-
-- __chunkedMode__ is not supported and all uploads are set to non-chunked mode.
-
 ## download
 
 __Parameters__:
@@ -320,10 +311,6 @@ __exception__ is never defined.
 - 3 = `FileTransferError.CONNECTION_ERR`
 - 4 = `FileTransferError.ABORT_ERR`
 - 5 = `FileTransferError.NOT_MODIFIED_ERR`
-
-## Windows Quirks
-
-- The plugin implementation is based on [BackgroundDownloader](https://msdn.microsoft.com/en-us/library/windows/apps/windows.networking.backgroundtransfer.backgrounddownloader.aspx)/[BackgroundUploader](https://msdn.microsoft.com/en-us/library/windows/apps/windows.networking.backgroundtransfer.backgrounduploader.aspx), which entails the latency issues on Windows devices (creation/starting of an operation can take up to a few seconds). You can use XHR or [HttpClient](https://msdn.microsoft.com/en-us/library/windows/apps/windows.web.http.httpclient.aspx) as a quicker alternative for small downloads.
 
 ## Backwards Compatibility Notes
 

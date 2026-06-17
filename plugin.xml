@@ -29,7 +29,11 @@
     <repo>https://github.com/apache/cordova-plugin-file-transfer</repo>
     <issue>https://github.com/apache/cordova-plugin-file-transfer/issues</issue>
 
-    <dependency id="cordova-plugin-file" version=">=5.0.0" />
+    <engines>
+        <engine name="cordova-android" version=">=12.0.0" />
+    </engines>
+
+    <dependency id="cordova-plugin-file" version="^8.0.0" />
 
     <!-- make these preferences available to the plugin impl (currently not required) -->
 <!--    <preference name="OverrideUserAgent" default="" />-->
@@ -67,13 +71,6 @@
         <source-file src="src/ios/CDVFileTransfer.m" />
 
         <framework src="AssetsLibrary.framework" />
-    </platform>
-
-    <!-- windows -->
-    <platform name="windows">
-        <js-module src="src/windows/FileTransferProxy.js" name="FileTransferProxy">
-            <runs />
-        </js-module>
     </platform>
 
     <!-- browser -->
