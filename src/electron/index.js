@@ -248,6 +248,11 @@ const DOWNLOAD_IMPLS = {
                         if (res.statusCode === 404)
                             return _reject(new FileTransferError(FileTransferError.INVALID_URL_ERR, source, target, res.statusCode, res,
                                 {message: "net download not found"}));
+                        else if (res.statusCode === 408) {
+                            _retry = true;
+                            return _reject(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.statusCode, res,
+                                {message: "net download timeout"}));
+                        }
                         else
                             return _reject(new FileTransferError(FileTransferError.CONNECTION_ERR, source, target, res.statusCode, res,
                                 {message: "net download response indicated error. " + res.statusMessage}));
