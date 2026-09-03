@@ -220,11 +220,12 @@ const DOWNLOAD_IMPLS = {
                     reject(error);
                 }
 
-
+                // https://www.electronjs.org/docs/latest/api/session
+                // options of existing session@partition cannot be changed. so we always create a new in memory session without caching
                 const req = net.request({
                     method: 'GET',
                     url: source,
-                    session: session.fromPartition('', {cache: false}),
+                    session: session.fromPartition('fileTransfer.' + Date.now(), {cache: false}),
                     credentials: 'include',
 
                 });
