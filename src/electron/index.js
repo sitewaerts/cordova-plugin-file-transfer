@@ -224,7 +224,7 @@ const DOWNLOAD_IMPLS = {
                 const req = net.request({
                     method: 'GET',
                     url: source,
-                    session: session.fromPartition(''),
+                    session: session.fromPartition('', {cache: false}),
                     credentials: 'include',
 
                 });
